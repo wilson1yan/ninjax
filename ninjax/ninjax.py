@@ -645,3 +645,19 @@ def FromOptax(ctor):
       return loss, params, grads
 
   return OptaxModule
+
+
+def layer_stack(module, amount):
+  def inner(x, *args, **kwargs):
+    def body(carry, xs):
+      params, rng = xs
+      changes, (carry, other) = pure(module, nested=True)(
+          params, carry, *args, **kwargs, seed=rng
+      )
+      return carry, (changes, other)
+    rngs = seed(amount=amount)
+    carry, (changes, other) = jax.lax.scan(
+        body, x, ({} if creating() else module.find(), rngs), length=amount)
+    module.put(changes)
+    return carry, other
+  return inner
