@@ -647,17 +647,45 @@ def FromOptax(ctor):
   return OptaxModule
 
 
-def layer_stack(module, amount):
-  def inner(x, *args, **kwargs):
-    def body(carry, xs):
-      params, rng = xs
-      changes, (carry, other) = pure(module, nested=True)(
-          params, carry, *args, **kwargs, seed=rng
-      )
-      return carry, (changes, other)
-    rngs = seed(amount=amount)
-    carry, (changes, other) = jax.lax.scan(
-        body, x, ({} if creating() else module.find(), rngs), length=amount)
-    module.put(changes)
-    return carry, other
-  return inner
+def layer_stack(module_cls, amount):
+
+  class LayerStack(module_cls):
+
+    def __call__(self, x, *args, **kwargs):
+      state, _, accessed, modified, created, = pure(module_cls.__call__, nested=True)(
+          dict(context()), self, x, *args,
+          ignore=True, track=True, seed=seed(None, True), **kwargs)
+      needed_global_vars = set([
+        x for x in accessed if not x.startswith(self._path)])
+      created_global_state = {k: v for k, v in state.items()
+                              if k in created and not k.startswith(self._path)}
+
+      def body(carry, xs):
+        (params_global, x), (params_local, rng) = carry, xs
+        params = {**params_global, **params_local}
+        changes, (x, other) = pure(module_cls.__call__, nested=True)(
+            params, self, x, *args, **kwargs, seed=rng
+        )
+        changes_local = {k: v for k, v in changes.items()
+                if k in created | modified and k not in needed_global_vars}
+        changes_global = {k: v for k, v in changes.items()
+                          if k in params_global}
+        return (changes_global, x), (changes_local, other)
+
+      rngs = seed(amount, True)
+      needed_local, needed_global = {}, created_global_state
+      for k, v in context().items():
+        if k not in accessed:
+          continue
+        if k in needed_global_vars:
+          needed_global[k] = v
+        else:
+          needed_local[k] = v
+      (changes_global, x), (changes_local, other) = jax.lax.scan(
+          body, (needed_global, x), (needed_local, rngs),length=amount)
+      self.put(changes_local)
+      context().update(changes_global)
+      return x, other
+
+  return LayerStack
+
