@@ -8,12 +8,15 @@ def init_kernel(shape):
 
 
 class Layer(nj.Module):
+  offset: int = 1
+
   def __init__(self, units):
     self.units = units
 
   def __call__(self, x):
     x = x @ self.get(
         'kernel', init_kernel, (x.shape[-1], self.units))
+    x += self.offset
     if 'counter' not in nj.context():
       nj.context()['counter'] = jnp.zeros((), jnp.float32)
     nj.context()['counter'] += 1
@@ -31,11 +34,13 @@ class Net(nj.Module):
   def __call__(self, x):
     if 'counter_outer' not in nj.context():
       nj.context()['counter_outer'] = jnp.zeros((), jnp.float32)
+    nj.context()['counter_outer'] += 1
     if self.unroll:
       for i in range(self.layers):
         x, _  = Layer(self.units, name=f'linear{i}')(x)
     else:
-      x, _ = nj.layer_stack(Layer, self.layers)(self.units, name='linear')(x)
+      layer = Layer(self.units, name='linear')
+      x, _ = nj.LayerStack(layer, self.layers, name='stack')(x)
     return x
 
 
@@ -48,10 +53,11 @@ class TestLayerStack:
     params = nj.init(net)({}, data, seed=123)
     assert jnp.allclose(params['counter'], 0.0)
     assert jnp.allclose(params['counter_outer'], 0.0)
+    print(params.keys())
     for i in range(1, n_layers):
       assert not jnp.allclose(
-          params['net/linear/kernel'][0],
-          params['net/linear/kernel'][i])
+          params['net/stack/linear/kernel'][0],
+          params['net/stack/linear/kernel'][i])
 
   def test_fwd_bwd(self):
     B, D, n_layers = 2, 8, 4
@@ -62,7 +68,7 @@ class TestLayerStack:
 
     def to_scanned_format(input_unrolled):
       return {
-          'net/linear/kernel': jnp.stack([
+          'net/stack/linear/kernel': jnp.stack([
             input_unrolled[f'net/linear{i}/kernel'] for i in range(4)]),
           'counter': input_unrolled['counter'],
           'counter_outer': input_unrolled['counter_outer'],
@@ -84,8 +90,8 @@ class TestLayerStack:
     loss, grads = fn(params, data, net)
     assert loss.item() == loss_unrolled.item()
     assert jnp.allclose(
-        grads_unrolled['net/linear/kernel'],
-        grads['net/linear/kernel']
+        grads_unrolled['net/stack/linear/kernel'],
+        grads['net/stack/linear/kernel']
     )
 
 
@@ -100,14 +106,20 @@ class TestLayerStack:
       return changes
     fn = jax.jit(fn)
 
+    assert params['counter'].shape == ()
+    assert params['counter_outer'].shape == ()
     assert jnp.allclose(params['counter'], 0.0)
     assert jnp.allclose(params['counter_outer'], 0.0)
 
     params = fn(params, data)
+    assert params['counter'].shape == ()
+    assert params['counter_outer'].shape == ()
     assert jnp.allclose(params['counter'], 4.0)
-    assert jnp.allclose(params['counter_outer'], 8.0)
+    assert jnp.allclose(params['counter_outer'], 9.0)
 
     params = fn(params, data)
+    assert params['counter'].shape == ()
+    assert params['counter_outer'].shape == ()
     assert jnp.allclose(params['counter'], 8.0)
-    assert jnp.allclose(params['counter_outer'], 16.0)
+    assert jnp.allclose(params['counter_outer'], 18.0)
 

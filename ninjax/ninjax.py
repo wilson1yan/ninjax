@@ -647,45 +647,52 @@ def FromOptax(ctor):
   return OptaxModule
 
 
-def layer_stack(module_cls, amount):
+class LayerStack(Module):
 
-  class LayerStack(module_cls):
+  def __init__(self, fun, amount):
+    self.fun = fun
+    self.amount = amount
 
-    def __call__(self, x, *args, **kwargs):
-      state, _, accessed, modified, created, = pure(module_cls.__call__, nested=True)(
-          dict(context()), self, x, *args,
-          ignore=True, track=True, seed=seed(None, True), **kwargs)
-      needed_global_vars = set([
-        x for x in accessed if not x.startswith(self._path)])
-      created_global_state = {k: v for k, v in state.items()
-                              if k in created and not k.startswith(self._path)}
+  def __call__(self, x, *args, **kwargs):
+    parent = '/'.join(self.path.split('/')[:-1])
+    pre_run_context = {k.replace(self.path, parent): v
+                       for k, v in context().items()}
+    state, _, accessed, modified, created = pure(self.fun, nested=True)(
+        dict(pre_run_context), x, *args,
+        ignore=True, track=True, seed=seed(None, True), **kwargs)
+    if not creating():
+      created = set([k.replace(self.path, parent) for k in self.find().keys()])
+    needed_global_vars = set([
+      x for x in accessed if not x.startswith(parent) or x not in created])
+    created_global_state = {k: v for k, v in state.items()
+                            if k in created and not k.startswith(parent)}
 
-      def body(carry, xs):
-        (params_global, x), (params_local, rng) = carry, xs
-        params = {**params_global, **params_local}
-        changes, (x, other) = pure(module_cls.__call__, nested=True)(
-            params, self, x, *args, **kwargs, seed=rng
-        )
-        changes_local = {k: v for k, v in changes.items()
-                if k in created | modified and k not in needed_global_vars}
-        changes_global = {k: v for k, v in changes.items()
-                          if k in params_global}
-        return (changes_global, x), (changes_local, other)
+    needed_local = self.find(empty_ok=True)
+    needed_local = {k.replace(self.path, parent): v
+                    for k, v in needed_local.items()}
+    needed_global = created_global_state
+    needed_global.update({
+      k: v for k, v in context().items() if k in needed_global_vars})
 
-      rngs = seed(amount, True)
-      needed_local, needed_global = {}, created_global_state
-      for k, v in context().items():
-        if k not in accessed:
-          continue
-        if k in needed_global_vars:
-          needed_global[k] = v
-        else:
-          needed_local[k] = v
-      (changes_global, x), (changes_local, other) = jax.lax.scan(
-          body, (needed_global, x), (needed_local, rngs),length=amount)
-      self.put(changes_local)
-      context().update(changes_global)
-      return x, other
+    def body(carry, xs):
+      (params_global, x), (params_local, rng) = carry, xs
+      params = {**params_global, **params_local}
+      changes, (x, other) = pure(self.fun, nested=True)(
+          params, x, *args, **kwargs, seed=rng
+      )
+      changes_local = {k: v for k, v in changes.items()
+              if k in created | modified and k not in needed_global_vars}
+      changes_global = {k: v for k, v in changes.items()
+                        if k in params_global}
+      return (changes_global, x), (changes_local, other)
 
-  return LayerStack
+    rngs = seed(self.amount, True)
+    (changes_global, x), (changes_local, other) = jax.lax.scan(
+        body, (needed_global, x), (needed_local, rngs),length=self.amount)
+
+    changes_local = {k.removeprefix(parent + '/'): v
+                     for k, v in changes_local.items()}
+    self.put(changes_local, prefix=True)
+    context().update(changes_global)
+    return x, other
 

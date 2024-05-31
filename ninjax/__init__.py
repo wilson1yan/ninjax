@@ -25,4 +25,4 @@ from .ninjax import FromHaiku
 from .ninjax import FromFlax
 from .ninjax import FromOptax
 
-from .ninjax import layer_stack
+from .ninjax import LayerStack
