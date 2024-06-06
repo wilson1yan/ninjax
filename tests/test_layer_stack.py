@@ -43,6 +43,9 @@ class Net(nj.Module):
       x, _ = nj.LayerStack(layer, self.layers, name='stack')(x)
     return x
 
+  def loss(self, x):
+    return self(x).mean()
+
 
 class TestLayerStack:
 
@@ -53,7 +56,6 @@ class TestLayerStack:
     params = nj.init(net)({}, data, seed=123)
     assert jnp.allclose(params['counter'], 0.0)
     assert jnp.allclose(params['counter_outer'], 0.0)
-    print(params.keys())
     for i in range(1, n_layers):
       assert not jnp.allclose(
           params['net/stack/linear/kernel'][0],
@@ -75,19 +77,16 @@ class TestLayerStack:
       }
     params = to_scanned_format(params_unrolled)
 
-    def fn(params, x, model):
-      def loss_fn(params):
-        _, out = nj.pure(model)(params, x, seed=0)
-        return out.mean()
-      loss, grads = jax.value_and_grad(loss_fn)(params)
+    def fn(x, model):
+      keys = tuple(nj.context().keys())
+      loss, x, grads = nj.grad(model.loss, keys)(x)
       return loss, grads
-    fn = jax.jit(fn, static_argnums=(2,))
+    fn = jax.jit(nj.pure(fn), static_argnums=(2,))
 
-    loss_unrolled, grads_unrolled = fn(params_unrolled, data, net_unrolled)
+    _, (loss_unrolled, grads_unrolled) = fn(params_unrolled, data, net_unrolled)
     grads_unrolled = to_scanned_format(grads_unrolled)
-    print(loss_unrolled)
 
-    loss, grads = fn(params, data, net)
+    _, (loss, grads) = fn(params, data, net)
     assert loss.item() == loss_unrolled.item()
     assert jnp.allclose(
         grads_unrolled['net/stack/linear/kernel'],
